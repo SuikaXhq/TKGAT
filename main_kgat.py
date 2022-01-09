@@ -1,3 +1,6 @@
+ # Last.FM:
+ # python main_kgat.py --data_name last-fm --cf_batch_size 256 --kg_batch_size 512
+
 import os
 os.environ['CUDA_VISIBLE_DEVICES'] = '3'
 
@@ -105,23 +108,24 @@ def train(args):
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
     # move graph data to GPU
-    train_graph = data.train_graph
-    train_nodes = torch.LongTensor(train_graph.ndata['id'])
-    train_edges = torch.LongTensor(train_graph.edata['type'])
     if use_cuda:
-        train_nodes = train_nodes.to(device)
-        train_edges = train_edges.to(device)
-    train_graph.ndata['id'] = train_nodes
-    train_graph.edata['type'] = train_edges
+        train_graph = data.train_graph
+        # train_nodes = torch.LongTensor(train_graph.ndata['id'])
+        # train_edges = torch.LongTensor(train_graph.edata['type'])
+        train_graph = train_graph.to(device)
+        # train_nodes = train_nodes.to(device)
+        # train_edges = train_edges.to(device)
+        # train_graph.ndata['id'] = train_nodes
+        # train_graph.edata['type'] = train_edges
 
-    test_graph = data.test_graph
-    test_nodes = torch.LongTensor(test_graph.ndata['id'])
-    test_edges = torch.LongTensor(test_graph.edata['type'])
-    if use_cuda:
-        test_nodes = test_nodes.to(device)
-        test_edges = test_edges.to(device)
-    test_graph.ndata['id'] = test_nodes
-    test_graph.edata['type'] = test_edges
+        # test_graph = data.test_graph
+        # test_nodes = torch.LongTensor(test_graph.ndata['id'])
+        # test_edges = torch.LongTensor(test_graph.edata['type'])
+        # test_graph = test_graph.to(device)
+        # test_nodes = test_nodes.to(device)
+        # test_edges = test_edges.to(device)
+        # test_graph.ndata['id'] = test_nodes
+        # test_graph.edata['type'] = test_edges
 
     # initialize metrics
     best_epoch = -1
@@ -275,7 +279,9 @@ def predict(args):
     test_graph.edata['type'] = test_edges
 
     # predict
-    cf_scores, precision, recall, ndcg = evaluate(model, train_graph, data.train_user_dict, data.test_user_dict, user_ids_batches, item_ids, args.K)
+    cf_scores_20, precision_20, recall_20, ndcg_20 = evaluate(model, train_graph, data.train_user_dict, data.test_user_dict, user_ids_batches, item_ids, 20)
+    cf_scores_10, precision_10, recall_10, ndcg_10 = evaluate(model, train_graph, data.train_user_dict, data.test_user_dict, user_ids_batches, item_ids, 10)
+    cf_scores_5, precision_5, recall_5, ndcg_5 = evaluate(model, train_graph, data.train_user_dict, data.test_user_dict, user_ids_batches, item_ids, 5)
     np.save(args.save_dir + 'cf_scores.npy', cf_scores)
     print('CF Evaluation: Precision {:.4f} Recall {:.4f} NDCG {:.4f}'.format(precision, recall, ndcg))
 

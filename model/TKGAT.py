@@ -10,7 +10,7 @@ def _L2_loss_mean(x):
     return torch.mean(torch.sum(torch.pow(x, 2), dim=1, keepdim=False) / 2.)
 
 
-class Aggregator(nn.Module):
+class Aggregator(nn.Module): # TODO: modify aggregations
 
     def __init__(self, in_dim, out_dim, dropout, aggregator_type):
         super(Aggregator, self).__init__()
@@ -72,7 +72,7 @@ class TKGAT(nn.Module):
 
     def __init__(self, args,
                  n_users, n_entities, n_relations,
-                 user_pre_embed=None, item_pre_embed=None):
+                 word_embed=None, tag_embed=None, word_offset=None, tag_offset=None):
 
         super(TKGAT, self).__init__()
         self.use_pretrain = args.use_pretrain
@@ -80,6 +80,8 @@ class TKGAT(nn.Module):
         self.n_users = n_users
         self.n_entities = n_entities
         self.n_relations = n_relations
+        self.word_offset = word_offset
+        self.tag_offset = tag_offset
 
         self.entity_dim = args.entity_dim
         self.relation_dim = args.relation_dim
@@ -93,15 +95,21 @@ class TKGAT(nn.Module):
         self.cf_l2loss_lambda = args.cf_l2loss_lambda
 
         self.relation_embed = nn.Embedding(self.n_relations, self.relation_dim)
-        self.entity_user_embed = nn.Embedding(self.n_entities + self.n_users, self.entity_dim)
-        if (self.use_pretrain == 1) and (user_pre_embed is not None) and (item_pre_embed is not None):
-            other_entity_embed = nn.Parameter(torch.Tensor(self.n_entities - item_pre_embed.shape[0], self.entity_dim))
-            nn.init.xavier_uniform_(other_entity_embed, gain=nn.init.calculate_gain('relu'))
-            entity_user_embed = torch.cat([item_pre_embed, other_entity_embed, user_pre_embed], dim=0)
-            self.entity_user_embed.weight = nn.Parameter(entity_user_embed)
-
+        self.entity_user_embed = nn.Embedding(self.n_entities, self.entity_dim)
         self.W_R = nn.Parameter(torch.Tensor(self.n_relations, self.entity_dim, self.relation_dim))
         nn.init.xavier_uniform_(self.W_R, gain=nn.init.calculate_gain('relu'))
+
+        if (self.use_pretrain == 1) and (word_embed is not None) and (tag_embed is not None):
+            other_entity_embed = nn.Parameter(torch.Tensor(self.n_entities - word_embed.shape[0], self.entity_dim))
+            nn.init.xavier_uniform_(other_entity_embed, gain=nn.init.calculate_gain('relu'))
+            entity_user_embed = torch.cat([other_entity_embed, word_embed], dim=0)
+            self.entity_user_embed.weight = nn.Parameter(entity_user_embed)
+
+            other_relation_embed = nn.Parameter(torch.Tensor(self.n_entities - tag_embed.shape[0], self.relation_dim))
+            nn.init.xavier_uniform_(other_relation_embed, gain=nn.init.calculate_gain('relu'))
+            tag_embed_trans = torch.bmm(tag_embed.unsqueeze(1), self.W_R.data[-tag_embed.shape[0]:, ...]).squeeze(1)
+            relation_embed = torch.cat([other_relation_embed, tag_embed_trans], dim=0)
+            self.relation_embed.weight = nn.Parameter(relation_embed)
 
         self.aggregator_layers = nn.ModuleList()
         for k in range(self.n_layers):

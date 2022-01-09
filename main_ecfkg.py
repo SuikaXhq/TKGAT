@@ -1,5 +1,5 @@
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3'
+os.environ['CUDA_VISIBLE_DEVICES'] = '3'
 
 import random
 import logging
@@ -11,8 +11,8 @@ import numpy as np
 import pandas as pd
 import torch.nn as nn
 import torch.optim as optim
-import torch.distributed as dist
-dist.init_process_group(backend="nccl")
+# import torch.distributed as dist
+# dist.init_process_group(backend="nccl")
 
 from model.ECFKG import ECFKG
 from utility.parser_ecfkg import *

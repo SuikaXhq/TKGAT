@@ -1,0 +1,6 @@
+org_id	remap_id
+genre	0
+director	1
+actor	2
+country	3
+location	4

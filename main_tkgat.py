@@ -1,5 +1,5 @@
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3'
+# os.environ['CUDA_VISIBLE_DEVICES'] = '3'
 
 import random
 import logging
@@ -77,12 +77,12 @@ def train(args):
     data = DataLoaderTKGAT(args, logging)
 
     if args.use_pretrain == 1:
-        user_pre_embed = torch.tensor(data.user_pre_embed)
-        item_pre_embed = torch.tensor(data.item_pre_embed)
+        word_embed = torch.tensor(data.word_embed)
+        tag_embed = torch.tensor(data.tag_embed)
     else:
-        user_pre_embed, item_pre_embed = None, None
+        word_embed, tag_embed = None, None
 
-    user_ids = list(data.test_user_dict.keys())
+    user_ids = list(data.valid_user_dict.keys())
     user_ids_batches = [user_ids[i: i + args.test_batch_size] for i in range(0, len(user_ids), args.test_batch_size)]
     user_ids_batches = [torch.LongTensor(d) for d in user_ids_batches]
     if use_cuda:
@@ -93,7 +93,7 @@ def train(args):
         item_ids = item_ids.to(device)
 
     # construct model & optimizer
-    model = TKGAT(args, data.n_users, data.n_entities, data.n_relations, user_pre_embed, item_pre_embed)
+    model = TKGAT(args, data.n_users, data.n_entities, data.n_relations, word_embed, tag_embed)
     if args.use_pretrain == 2:
         model = load_model(model, args.pretrain_model_path)
 
@@ -105,23 +105,25 @@ def train(args):
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
     # move graph data to GPU
+    
+    # train_nodes = torch.LongTensor(train_graph.ndata['id'])
+    # train_edges = torch.LongTensor(train_graph.edata['type'])
+    if use_cuda:
+        data.train_graph = data.train_graph.to(device)
+        # data.valid_graph = data.valid_graph.to(device)
+    #     train_nodes = train_nodes.to(device)
+    #     train_edges = train_edges.to(device)
+    # train_graph.ndata['id'] = train_nodes
+    # train_graph.edata['type'] = train_edges
     train_graph = data.train_graph
-    train_nodes = torch.LongTensor(train_graph.ndata['id'])
-    train_edges = torch.LongTensor(train_graph.edata['type'])
-    if use_cuda:
-        train_nodes = train_nodes.to(device)
-        train_edges = train_edges.to(device)
-    train_graph.ndata['id'] = train_nodes
-    train_graph.edata['type'] = train_edges
-
-    test_graph = data.test_graph
-    test_nodes = torch.LongTensor(test_graph.ndata['id'])
-    test_edges = torch.LongTensor(test_graph.edata['type'])
-    if use_cuda:
-        test_nodes = test_nodes.to(device)
-        test_edges = test_edges.to(device)
-    test_graph.ndata['id'] = test_nodes
-    test_graph.edata['type'] = test_edges
+    # valid_graph = data.valid_graph
+    # valid_nodes = torch.LongTensor(valid_graph.ndata['id'])
+    # valid_edges = torch.LongTensor(valid_graph.edata['type'])
+    # if use_cuda:
+    #     valid_nodes = valid_nodes.to(device)
+    #     valid_edges = valid_edges.to(device)
+    # valid_graph.ndata['id'] = valid_nodes
+    # valid_graph.edata['type'] = valid_edges
 
     # initialize metrics
     best_epoch = -1
@@ -148,7 +150,7 @@ def train(args):
 
         for iter in range(1, n_cf_batch + 1):
             time2 = time()
-            cf_batch_user, cf_batch_pos_item, cf_batch_neg_item = data.generate_cf_batch(data.train_user_dict)
+            cf_batch_user, cf_batch_pos_item, cf_batch_neg_item = data.generate_cf_batch(data.train_user_dict, train_graph.edata['att'])
             if use_cuda:
                 cf_batch_user = cf_batch_user.to(device)
                 cf_batch_pos_item = cf_batch_pos_item.to(device)
@@ -193,8 +195,8 @@ def train(args):
         # evaluate cf
         if (epoch % args.evaluate_every) == 0:
             time1 = time()
-            _, precision, recall, ndcg = evaluate(model, train_graph, data.train_user_dict, data.test_user_dict, user_ids_batches, item_ids, args.K)
-            logging.info('CF Evaluation: Epoch {:04d} | Total Time {:.1f}s | Precision {:.4f} Recall {:.4f} NDCG {:.4f}'.format(epoch, time() - time1, precision, recall, ndcg))
+            _, precision, recall, ndcg = evaluate(model, train_graph, data.train_user_dict, data.valid_user_dict, user_ids_batches, item_ids, args.K)
+            logging.info('CF Validation: Epoch {:04d} | Total Time {:.1f}s | Precision {:.4f} Recall {:.4f} NDCG {:.4f}'.format(epoch, time() - time1, precision, recall, ndcg))
 
             epoch_list.append(epoch)
             precision_list.append(precision)
@@ -214,10 +216,13 @@ def train(args):
     save_model(model, args.save_dir, epoch)
 
     # save metrics
-    _, precision, recall, ndcg = evaluate(model, train_graph, data.train_user_dict, data.test_user_dict, user_ids_batches, item_ids, args.K)
-    logging.info('Final CF Evaluation: Precision {:.4f} Recall {:.4f} NDCG {:.4f}'.format(precision, recall, ndcg))
+    best_index = epoch_list.index(best_epoch)
+    precision = precision_list[best_index]
+    recall = recall_list[best_index]
+    ndcg = ndcg_list[best_index]
+    logging.info('Best CF Validation: Precision {:.4f} Recall {:.4f} NDCG {:.4f}'.format(precision, recall, ndcg))
 
-    epoch_list.append(epoch)
+    epoch_list.append('best')
     precision_list.append(precision)
     recall_list.append(recall)
     ndcg_list.append(ndcg)
@@ -256,35 +261,42 @@ def predict(args):
     #     model = nn.parallel.DistributedDataParallel(model)
 
     # move graph data to GPU
-    train_graph = data.train_graph
-    train_nodes = torch.LongTensor(train_graph.ndata['id'])
-    train_edges = torch.LongTensor(train_graph.edata['type'])
     if use_cuda:
-        train_nodes = train_nodes.to(device)
-        train_edges = train_edges.to(device)
-    train_graph.ndata['id'] = train_nodes
-    train_graph.edata['type'] = train_edges
+        train_graph = data.train_graph.to(device)
+    # train_graph = data.train_graph
+    # train_nodes = torch.LongTensor(train_graph.ndata['id'])
+    # train_edges = torch.LongTensor(train_graph.edata['type'])
+    # if use_cuda:
+    #     train_nodes = train_nodes.to(device)
+    #     train_edges = train_edges.to(device)
+    # train_graph.ndata['id'] = train_nodes
+    # train_graph.edata['type'] = train_edges
 
-    test_graph = data.test_graph
-    test_nodes = torch.LongTensor(test_graph.ndata['id'])
-    test_edges = torch.LongTensor(test_graph.edata['type'])
-    if use_cuda:
-        test_nodes = test_nodes.to(device)
-        test_edges = test_edges.to(device)
-    test_graph.ndata['id'] = test_nodes
-    test_graph.edata['type'] = test_edges
+    # test_graph = data.test_graph
+    # test_nodes = torch.LongTensor(test_graph.ndata['id'])
+    # test_edges = torch.LongTensor(test_graph.edata['type'])
+    # if use_cuda:
+    #     test_nodes = test_nodes.to(device)
+    #     test_edges = test_edges.to(device)
+    # test_graph.ndata['id'] = test_nodes
+    # test_graph.edata['type'] = test_edges
 
     # predict
     cf_scores, precision, recall, ndcg = evaluate(model, train_graph, data.train_user_dict, data.test_user_dict, user_ids_batches, item_ids, args.K)
     np.save(args.save_dir + 'cf_scores.npy', cf_scores)
     print('CF Evaluation: Precision {:.4f} Recall {:.4f} NDCG {:.4f}'.format(precision, recall, ndcg))
-
+    with open(os.path.join(args.save_path, 'test_result.tsv')) as f:
+        f.write('epoch_idx\tprecision@{}\trecall@{}\tndcg@{}\n'.format(args.K, args.K, args.K))
+        f.write('{}\t{}\t{}\t{}'.format(args.pretrain_model_epoch, precision, recall, ndcg))
 
 
 if __name__ == '__main__':
     args = parse_tkgat_args()
-    train(args)
-    # predict(args)
+    os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
+    if args.test:
+        predict(args)
+    else:
+        train(args)
 
 
 
