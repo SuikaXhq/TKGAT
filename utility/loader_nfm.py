@@ -7,7 +7,7 @@ import torch
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
-
+import pickle
 
 class DataLoaderNFM(object):
 
@@ -15,22 +15,37 @@ class DataLoaderNFM(object):
         self.args = args
         self.data_name = args.data_name
         self.use_pretrain = args.use_pretrain
-        self.pretrain_embedding_dir = args.pretrain_embedding_dir
+        self.social_net = args.social_net
+        # self.pretrain_embedding_dir = args.pretrain_embedding_dir
+        self.name = 'DataLoaderNFM_' + args.data_name + ('_use_pretrain' if self.use_pretrain else '') + '_dump.pkl'
+        self.dump_path = os.path.join(args.dump_dir, self.name)
 
+        # detect dump file to accelerate process
+        if os.path.exists(self.dump_path):
+            with open(self.dump_path, 'rb') as dump_file:
+                state_dict = pickle.load(dump_file)
+            self.__dict__.update(state_dict)
+        else:
+            data_dir = os.path.join(args.data_dir, args.data_name)
+            train_file = os.path.join(data_dir, 'train.txt')
+            test_file = os.path.join(data_dir, 'test.txt')
+            valid_file = os.path.join(data_dir, 'valid.txt')
+
+            self.cf_train_data, self.train_user_dict = self.load_cf(train_file)
+            self.cf_test_data, self.test_user_dict = self.load_cf(test_file)
+            self.cf_valid_data, self.valid_user_dict = self.load_cf(valid_file)
+            self.statistic_cf()
+
+            if self.social_net:
+                self.construct_data()
+            else:
+                kg_file = os.path.join(data_dir, "kg_final.txt")
+                kg_data = self.load_kg(kg_file)
+                self.construct_data(kg_data)
+            
+        
         self.train_batch_size = args.train_batch_size
         self.test_batch_size = args.test_batch_size
-
-        data_dir = os.path.join(args.data_dir, args.data_name)
-        train_file = os.path.join(data_dir, 'train.txt')
-        test_file = os.path.join(data_dir, 'test.txt')
-        kg_file = os.path.join(data_dir, "kg_final.txt")
-
-        self.cf_train_data, self.train_user_dict = self.load_cf(train_file)
-        self.cf_test_data, self.test_user_dict = self.load_cf(test_file)
-        self.statistic_cf()
-
-        kg_data = self.load_kg(kg_file)
-        self.construct_data(kg_data)
         self.print_info(logging)
 
         if self.use_pretrain == 1:
@@ -62,10 +77,11 @@ class DataLoaderNFM(object):
 
 
     def statistic_cf(self):
-        self.n_users = max(max(self.cf_train_data[0]), max(self.cf_test_data[0])) + 1
-        self.n_items = max(max(self.cf_train_data[1]), max(self.cf_test_data[1])) + 1
+        self.n_users = max(max(self.cf_train_data[0]), max(self.cf_valid_data[0]), max(self.cf_test_data[0])) + 1
+        self.n_items = max(max(self.cf_train_data[1]), max(self.cf_valid_data[1]), max(self.cf_test_data[1])) + 1
         self.n_cf_train = len(self.cf_train_data[0])
         self.n_cf_test = len(self.cf_test_data[0])
+        self.n_cf_valid = len(self.cf_valid_data[0])
 
 
     def load_kg(self, filename):
@@ -74,26 +90,29 @@ class DataLoaderNFM(object):
         return kg_data
 
 
-    def construct_data(self, kg_data):
+    def construct_data(self, kg_data=None):
         # re-map user id
-        self.n_entities = max(max(kg_data['h']), max(kg_data['t'])) + 1
+        self.n_entities = max(max(kg_data['h']), max(kg_data['t'])) + 1 if kg_data is not None else self.n_items
         self.n_users_entities = self.n_users + self.n_entities
 
         self.cf_train_data = (np.array(list(map(lambda d: d + self.n_entities, self.cf_train_data[0]))).astype(np.int32), self.cf_train_data[1].astype(np.int32))
         self.cf_test_data = (np.array(list(map(lambda d: d + self.n_entities, self.cf_test_data[0]))).astype(np.int32), self.cf_test_data[1].astype(np.int32))
+        self.cf_valid_data = (np.array(list(map(lambda d: d + self.n_entities, self.cf_valid_data[0]))).astype(np.int32), self.cf_valid_data[1].astype(np.int32))
 
         self.train_user_dict = {k + self.n_entities: np.unique(v).astype(np.int32) for k, v in self.train_user_dict.items()}
         self.test_user_dict = {k + self.n_entities: np.unique(v).astype(np.int32) for k, v in self.test_user_dict.items()}
+        self.valid_user_dict = {k + self.n_entities: np.unique(v).astype(np.int32) for k, v in self.valid_user_dict.items()}
 
         # construct feature matrix
         feat_rows = list(range(self.n_items))
         feat_cols = list(range(self.n_items))
         feat_data = [1] * self.n_items
 
-        filtered_kg_data = kg_data[kg_data['h'] < self.n_items]
-        feat_rows += filtered_kg_data['h'].tolist()
-        feat_cols += filtered_kg_data['t'].tolist()
-        feat_data += [1] * filtered_kg_data.shape[0]
+        if kg_data is not None:
+            filtered_kg_data = kg_data[kg_data['h'] < self.n_items]
+            feat_rows += filtered_kg_data['h'].tolist()
+            feat_cols += filtered_kg_data['t'].tolist()
+            feat_data += [1] * filtered_kg_data.shape[0]
 
         self.user_matrix = sp.identity(self.n_users).tocsr()
         self.feat_matrix = sp.coo_matrix((feat_data, (feat_rows, feat_cols)), shape=(self.n_items, self.n_entities)).tocsr()
@@ -107,6 +126,7 @@ class DataLoaderNFM(object):
 
         logging.info('n_cf_train:           %d' % self.n_cf_train)
         logging.info('n_cf_test:            %d' % self.n_cf_test)
+        logging.info('n_cf_valid:         %d' % self.n_cf_valid)
 
         logging.info('shape of user_matrix: {}'.format(self.user_matrix.shape))
         logging.info('shape of feat_matrix: {}'.format(self.feat_matrix.shape))
@@ -154,7 +174,7 @@ class DataLoaderNFM(object):
 
 
     def generate_train_batch(self, user_dict):
-        exist_users = user_dict.keys()
+        exist_users = list(user_dict.keys())
         if self.train_batch_size <= len(exist_users):
             batch_user = random.sample(exist_users, self.train_batch_size)
         else:

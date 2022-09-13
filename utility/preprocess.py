@@ -12,10 +12,20 @@ glove_path = os.path.join(data_dir, glove_file_name)
 word2vec_path = os.path.join(data_dir, word2vec_file_name)
 word2vec_dump_path = os.path.join(data_dir, 'pretrain/GloVe.kv')
 
-dataset_dir = './datasets/hetrec2011-movielens-2k-v2'
-# user_list_file_name = 'user'
-# item_list_file_name = 'movies.dat'
-interaction_file_name = 'user_ratedmovies.dat'
+dataset_name = 'delicious_small'
+
+if dataset_name == 'movielens':
+    dataset_dir = './datasets/hetrec2011-movielens-2k-v2'
+    interaction_file_name = 'user_ratedmovies.dat'
+elif dataset_name == 'lastfm':
+    dataset_dir = './datasets/hetrec2011-lastfm-2k'
+    interaction_file_name = 'user_artists.dat'
+elif dataset_name == 'delicious':
+    dataset_dir = './datasets/hetrec2011-delicious-2k'
+    interaction_file_name = 'user_taggedbookmarks.dat'
+elif dataset_name == 'delicious_small':
+    dataset_dir = './datasets/hetrec2011-delicious-2k'
+    interaction_file_name = 'user_taggedbookmarks_small.dat'
 interaction_file_path = os.path.join(dataset_dir, interaction_file_name)
 
 np.random.seed(123)
@@ -100,7 +110,8 @@ def construct_interaction_dataset(dataset_name, interaction_path, core_number=5,
     interactions = {}
     for line in interaction_list:
         user, item = int(line.split()[0]), int(line.split()[1])
-        interactions_org[user].append(item)
+        if item not in interactions_org[user]:
+            interactions_org[user].append(item)
     users_org = list(interactions_org.keys())
     
     # select users that interact with more than given number (parameter 'core_number') of items
@@ -134,13 +145,14 @@ def construct_interaction_dataset(dataset_name, interaction_path, core_number=5,
     test_list = collections.defaultdict(list)
     for user_id, user_interactions in interactions.items():
         length = len(user_interactions)
-        indices = np.arange(length)
+        user_interactions = np.asarray(user_interactions)
+        indices = np.arange(length, dtype=np.int32)
         np.random.shuffle(indices)
         test_length = ceil(length * train_test_ratio[2])
         valid_length = ceil(length * train_test_ratio[1]) + test_length
-        test_list[user_id] = indices[:test_length]
-        valid_list[user_id] = indices[test_length:valid_length]
-        train_list[user_id] = indices[valid_length:]
+        test_list[user_id] = user_interactions[indices[:test_length]]
+        valid_list[user_id] = user_interactions[indices[test_length:valid_length]]
+        train_list[user_id] = user_interactions[indices[valid_length:]]
     train_file = open(os.path.join(dataset_path, 'train.txt'), mode='w')
     valid_file = open(os.path.join(dataset_path, 'valid.txt'), mode='w')
     test_file = open(os.path.join(dataset_path, 'test.txt'), mode='w')
@@ -331,10 +343,165 @@ def construct_kg(dataset, raw_dataset_dir):
                 f.write('{} {} {}\n'.format(user, tag, item))
         print('Tag interactions saved.')
 
+    elif dataset == 'lastfm':
+        # process HetRec2011 LastFM Dataset
+        print('Processing {}...'.format(dataset))
+
+        # read user/item lists
+        save_dir = os.path.join(data_dir, dataset)
+        with open(os.path.join(save_dir, 'user_list.txt'), mode='r') as f:
+            user_list_lines = f.readlines()[1:] # first line is the column names, discard
+        with open(os.path.join(save_dir, 'item_list.txt'), mode='r') as f:
+            item_list_lines = f.readlines()[1:] # first line is the column names, discard
+
+        user_list = [None]*len(user_list_lines)
+        item_list = [None]*len(item_list_lines)
+        for line in user_list_lines:
+            org_id, index = line.split()
+            index = int(index)
+            user_list[index] = org_id
+        for line in item_list_lines:
+            org_id, index = line.split()
+            index = int(index)
+            item_list[index] = org_id
+
+        # map original ID into remap ID
+        user_id_map = {user: id for id, user in enumerate(user_list)}
+        item_id_map = {item: id for id, item in enumerate(item_list)}
+        print('User/Item ID map loaded.')
+
+        # read social network
+        social_dict = load_raw_kg(os.path.join(raw_dataset_dir, 'user_friends.dat'))
+
+        # remap user ids
+        user_id_map = {}
+        for id, user in enumerate(user_list):
+            user_id_map[user] = id
+
+        # construct and save social network (sn)
+        sn = collections.defaultdict(list)
+        for user, friends in social_dict.items():
+            if user in user_id_map:
+                for friend in friends:
+                    if friend in user_id_map:
+                        sn[user_id_map[user]].append(user_id_map[friend])
+        with open(os.path.join(save_dir, 'social_network.txt'), mode='w') as f:
+            for head, tails in sn.items():
+                for tail in tails:
+                    f.write('{} 0 {}\n'.format(head, tail))
+        print('Social network saved.')
+
+        # read tags
+        tag_list = []
+        with open(os.path.join(raw_dataset_dir, 'tags.dat'), mode='r') as f:
+            for line in f.readlines()[1:]:
+                tag_id, description = line.split('\t')
+                tag_list.append((tag_id, description.strip()))
+        tag_id_map = {item[0]: id for id, item in enumerate(tag_list)}
+        
+        tag_interaction_list = []
+        with open(os.path.join(raw_dataset_dir, 'user_taggedartists.dat'), mode='r') as f:
+            for line in f.readlines()[1:]:
+                user, movie, tag = line.split('\t')[:3]
+                if user in user_id_map and tag in tag_id_map and movie in item_id_map:
+                    tag_interaction_list.append((
+                        user_id_map[user],
+                        tag_id_map[tag],
+                        item_id_map[movie]
+                    ))
+            
+        # save tag interactions
+        with open(os.path.join(save_dir, 'tag_list.txt'), mode='w') as f:
+            f.write('org_id\tremap_id\tdescription\n')
+            for id, (tag, description) in enumerate(tag_list):
+                f.write('{}\t{}\t{}\n'.format(tag, id, description))
+        with open(os.path.join(save_dir, 'tagging.txt'), mode='w') as f:
+            for user, tag, item in tag_interaction_list:
+                f.write('{} {} {}\n'.format(user, tag, item))
+        print('Tag interactions saved.')
+
+    elif dataset == 'delicious' or dataset == 'delicious_small':
+        # process HetRec2011 Delicious Dataset
+        print('Processing {}...'.format(dataset))
+
+        # read user/item lists
+        save_dir = os.path.join(data_dir, dataset)
+        with open(os.path.join(save_dir, 'user_list.txt'), mode='r') as f:
+            user_list_lines = f.readlines()[1:] # first line is the column names, discard
+        with open(os.path.join(save_dir, 'item_list.txt'), mode='r') as f:
+            item_list_lines = f.readlines()[1:] # first line is the column names, discard
+
+        user_list = [None]*len(user_list_lines)
+        item_list = [None]*len(item_list_lines)
+        for line in user_list_lines:
+            org_id, index = line.split()
+            index = int(index)
+            user_list[index] = org_id
+        for line in item_list_lines:
+            org_id, index = line.split()
+            index = int(index)
+            item_list[index] = org_id
+
+        # map original ID into remap ID
+        user_id_map = {user: id for id, user in enumerate(user_list)}
+        item_id_map = {item: id for id, item in enumerate(item_list)}
+        print('User/Item ID map loaded.')
+
+        # read social network
+        social_dict = load_raw_kg(os.path.join(raw_dataset_dir, 'user_contacts.dat'))
+
+        # remap user ids
+        user_id_map = {}
+        for id, user in enumerate(user_list):
+            user_id_map[user] = id
+
+        # construct and save social network (sn)
+        sn = collections.defaultdict(list)
+        for user, friends in social_dict.items():
+            if user in user_id_map:
+                for friend in friends:
+                    if friend in user_id_map:
+                        sn[user_id_map[user]].append(user_id_map[friend])
+        with open(os.path.join(save_dir, 'social_network.txt'), mode='w') as f:
+            for head, tails in sn.items():
+                for tail in tails:
+                    f.write('{} 0 {}\n'.format(head, tail))
+        print('Social network saved.')
+
+        # read tags
+        tag_list = []
+        with open(os.path.join(raw_dataset_dir, 'tags.dat' if dataset == 'delicious' else 'tags_small.dat'), mode='r') as f:
+            for line in f.readlines()[1:]:
+                tag_id, description = line.split('\t')
+                tag_list.append((tag_id, description.strip()))
+        tag_id_map = {item[0]: id for id, item in enumerate(tag_list)}
+        
+        tag_interaction_list = []
+        with open(os.path.join(raw_dataset_dir, 'user_taggedbookmarks.dat' if dataset == 'delicious' else 'user_taggedbookmarks_small.dat'), mode='r') as f:
+            for line in f.readlines()[1:]:
+                user, movie, tag = line.split('\t')[:3]
+                if user in user_id_map and tag in tag_id_map and movie in item_id_map:
+                    tag_interaction_list.append((
+                        user_id_map[user],
+                        tag_id_map[tag],
+                        item_id_map[movie]
+                    ))
+            
+        # save tag interactions
+        with open(os.path.join(save_dir, 'tag_list.txt'), mode='w') as f:
+            f.write('org_id\tremap_id\tdescription\n')
+            for id, (tag, description) in enumerate(tag_list):
+                f.write('{}\t{}\t{}\n'.format(tag, id, description))
+        with open(os.path.join(save_dir, 'tagging.txt'), mode='w') as f:
+            for user, tag, item in tag_interaction_list:
+                f.write('{} {} {}\n'.format(user, tag, item))
+        print('Tag interactions saved.')
+
     else:
         raise NotImplementedError('KG construction of dataset \'{}\' is not implemented.'.format(dataset))
 
 if __name__ == '__main__':
-    # construct_interaction_dataset('movielens', interaction_file_path)
-    # construct_kg('movielens', dataset_dir)
-    read_glove(word2vec_path, save_path=word2vec_dump_path, format='w2v')
+    construct_interaction_dataset(dataset_name, interaction_file_path)
+    construct_kg(dataset_name, dataset_dir)
+    
+    # read_glove(word2vec_path, save_path=word2vec_dump_path, format='w2v')

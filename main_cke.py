@@ -1,5 +1,5 @@
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '3'
+# os.environ['CUDA_VISIBLE_DEVICES'] = '3'
 
 import random
 import logging
@@ -150,7 +150,7 @@ def train(args):
         # evaluate cf
         if (epoch % args.evaluate_every) == 0:
             time1 = time()
-            _, precision, recall, ndcg = evaluate(model, data.train_user_dict, data.test_user_dict, user_ids_batches, item_ids, args.K)
+            _, precision, recall, ndcg = evaluate(model, data.train_user_dict, data.valid_user_dict, user_ids_batches, item_ids, args.K)
             logging.info('CF Evaluation: Epoch {:04d} | Total Time {:.1f}s | Precision {:.4f} Recall {:.4f} NDCG {:.4f}'.format(epoch, time() - time1, precision, recall, ndcg))
 
             epoch_list.append(epoch)
@@ -170,11 +170,16 @@ def train(args):
     # save model
     save_model(model, args.save_dir, epoch)
 
+    # test best model
+    best_model_dir = os.path.join(args.save_dir, 'model_epoch{}.pth'.format(best_epoch))
+    model = load_model(model, best_model_dir)
+    model.to(device)
+
     # save metrics
     _, precision, recall, ndcg = evaluate(model, data.train_user_dict, data.test_user_dict, user_ids_batches, item_ids, args.K)
     logging.info('Final CF Evaluation: Precision {:.4f} Recall {:.4f} NDCG {:.4f}'.format(precision, recall, ndcg))
 
-    epoch_list.append(epoch)
+    epoch_list.append('Test_best')
     precision_list.append(precision)
     recall_list.append(recall)
     ndcg_list.append(ndcg)
@@ -219,6 +224,7 @@ def predict(args):
 
 if __name__ == '__main__':
     args = parse_cke_args()
+    os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
     train(args)
     # predict(args)
 

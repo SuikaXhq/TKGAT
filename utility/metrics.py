@@ -137,9 +137,18 @@ def calc_metrics_at_k(cf_scores, train_user_dict, test_user_dict, user_ids, item
         binary_hit.append(test_pos_item_binary[i][rank_indices[i]])
     binary_hit = np.array(binary_hit, dtype=np.float32)
 
-    precision = precision_at_k_batch(binary_hit, K)
-    recall = recall_at_k_batch(binary_hit, K)
-    ndcg = ndcg_at_k_batch(binary_hit, K)
+    if type(K) == int:
+        precision = precision_at_k_batch(binary_hit, K)
+        recall = recall_at_k_batch(binary_hit, K)
+        ndcg = ndcg_at_k_batch(binary_hit, K)
+    else:
+        precision = []
+        recall = []
+        ndcg = []
+        for k in K:
+            precision.append(precision_at_k_batch(binary_hit, k))
+            recall.append(recall_at_k_batch(binary_hit, k))
+            ndcg.append(ndcg_at_k_batch(binary_hit, k))
     return precision, recall, ndcg
 
 

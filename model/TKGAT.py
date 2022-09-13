@@ -1,3 +1,4 @@
+from platform import node
 import dgl
 import torch
 import torch.nn as nn
@@ -10,24 +11,27 @@ def _L2_loss_mean(x):
     return torch.mean(torch.sum(torch.pow(x, 2), dim=1, keepdim=False) / 2.)
 
 
-class Aggregator(nn.Module): # TODO: modify aggregations
+class Aggregator(nn.Module):
 
-    def __init__(self, in_dim, out_dim, dropout, aggregator_type):
+    def __init__(self, in_dim, out_dim, dropout, aggregator_type, n_attention_heads=1, device='cpu'):
         super(Aggregator, self).__init__()
         self.in_dim = in_dim
         self.out_dim = out_dim
         self.dropout = dropout
         self.aggregator_type = aggregator_type
-
+        self.n_attention_heads = n_attention_heads
+        assert(self.out_dim % self.n_attention_heads == 0)
         self.message_dropout = nn.Dropout(dropout)
+        self.node_batch_size = 1000
+        self.device = device
 
         if aggregator_type == 'gcn':
-            self.W = nn.Linear(self.in_dim, self.out_dim)       # W in Equation (6)
+            self.W = nn.Linear(self.in_dim, self.out_dim//self.n_attention_heads)       # W in Equation (6)
         elif aggregator_type == 'graphsage':
-            self.W = nn.Linear(self.in_dim * 2, self.out_dim)   # W in Equation (7)
+            self.W = nn.Linear(self.in_dim * 2, self.out_dim//self.n_attention_heads)   # W in Equation (7)
         elif aggregator_type == 'bi-interaction':
-            self.W1 = nn.Linear(self.in_dim, self.out_dim)      # W1 in Equation (8)
-            self.W2 = nn.Linear(self.in_dim, self.out_dim)      # W2 in Equation (8)
+            self.W1 = nn.Linear(self.in_dim, self.out_dim//self.n_attention_heads)      # W1 in Equation (8)
+            self.W2 = nn.Linear(self.in_dim, self.out_dim//self.n_attention_heads)      # W2 in Equation (8)
         else:
             raise NotImplementedError
 
@@ -36,13 +40,30 @@ class Aggregator(nn.Module): # TODO: modify aggregations
 
     def forward(self, mode, g, entity_embed):
         g = g.local_var()
-        g.ndata['node'] = entity_embed
-
+        g.ndata['node'] = entity_embed.unsqueeze(-2)            # (n_nodes, 1, in_dim)
+        
         # Equation (3) & (10)
         # DGL: dgl-cu90(0.4.1)
         # Get different results when using `dgl.function.sum`, and the randomness is due to `atomicAdd`
         # Use `dgl.function.sum` when training model to speed up
         # Use custom function to ensure deterministic behavior when predicting
+
+        # att: (n_attention_heads, 1)
+        # side/N_h: (n_attention_heads, in_dim)
+        
+        # N_h_full = []
+        # node_idx = torch.arange(g.num_nodes()).to(self.device)
+        # node_batches = [node_idx[i:i+self.node_batch_size] for i in range(0, g.num_nodes(), self.node_batch_size)]
+        # for node_batch in node_batches:
+        #     sub_g = g.subgraph(node_batch)
+        #     # if mode == 'predict':
+        #     #     sub_g.update_all(dgl.function.u_mul_e('node', 'att', 'side'), lambda nodes: {'N_h': torch.sum(nodes.mailbox['side'], 1)})
+        #     # else:
+        #     sub_g.update_all(dgl.function.u_mul_e('node', 'att', 'side'), dgl.function.sum('side', 'N_h'))
+        #     N_h_full.append(sub_g.ndata['N_h'])
+        
+        # g.ndata['N_h'] = torch.cat(N_h_full)
+
         if mode == 'predict':
             g.update_all(dgl.function.u_mul_e('node', 'att', 'side'), lambda nodes: {'N_h': torch.sum(nodes.mailbox['side'], 1)})
         else:
@@ -50,7 +71,9 @@ class Aggregator(nn.Module): # TODO: modify aggregations
 
         if self.aggregator_type == 'gcn':
             # Equation (6) & (9)
-            out = self.activation(self.W(g.ndata['node'] + g.ndata['N_h']))                         # (n_users + n_entities, out_dim)
+            # print('g.ndata["node"].shape = {}'.format(g.ndata['node'].shape))
+            # print('g.ndata["N_h"].shape = {}'.format(g.ndata['N_h'].shape))
+            out = self.activation(self.W((g.ndata['node'] + g.ndata['N_h']).reshape([-1, self.in_dim]))).reshape([-1, self.out_dim])                         # (n_users + n_entities, out_dim)
 
         elif self.aggregator_type == 'graphsage':
             # Equation (7) & (9)
@@ -58,8 +81,8 @@ class Aggregator(nn.Module): # TODO: modify aggregations
 
         elif self.aggregator_type == 'bi-interaction':
             # Equation (8) & (9)
-            out1 = self.activation(self.W1(g.ndata['node'] + g.ndata['N_h']))                       # (n_users + n_entities, out_dim)
-            out2 = self.activation(self.W2(g.ndata['node'] * g.ndata['N_h']))                       # (n_users + n_entities, out_dim)
+            out1 = self.activation(self.W1((g.ndata['node'] + g.ndata['N_h']).reshape([-1, self.in_dim]))).reshape([-1, self.out_dim])                       # (n_users + n_entities, out_dim)
+            out2 = self.activation(self.W2((g.ndata['node'] * g.ndata['N_h']).reshape([-1, self.in_dim]))).reshape([-1, self.out_dim])                       # (n_users + n_entities, out_dim)
             out = out1 + out2
         else:
             raise NotImplementedError
@@ -72,11 +95,11 @@ class TKGAT(nn.Module):
 
     def __init__(self, args,
                  n_users, n_entities, n_relations,
-                 word_embed=None, tag_embed=None, word_offset=None, tag_offset=None):
+                 word_embed=None, tag_embed=None, word_offset=None, tag_offset=None, device='cpu'):
 
         super(TKGAT, self).__init__()
         self.use_pretrain = args.use_pretrain
-
+        self.device = device
         self.n_users = n_users
         self.n_entities = n_entities
         self.n_relations = n_relations
@@ -90,6 +113,12 @@ class TKGAT(nn.Module):
         self.conv_dim_list = [args.entity_dim] + eval(args.conv_dim_list)
         self.mess_dropout = eval(args.mess_dropout)
         self.n_layers = len(eval(args.conv_dim_list))
+        self.n_attention_heads = args.n_attention_heads
+        self.attention_dim = args.attention_dim
+
+        for dim in self.conv_dim_list[1:]:
+            if dim % self.n_attention_heads != 0:
+                raise RuntimeError(f'Dimension (got {dim}) should be divisible by number of heads (got {self.n_attention_heads}).')
 
         self.kg_l2loss_lambda = args.kg_l2loss_lambda
         self.cf_l2loss_lambda = args.cf_l2loss_lambda
@@ -97,7 +126,9 @@ class TKGAT(nn.Module):
         self.relation_embed = nn.Embedding(self.n_relations, self.relation_dim)
         self.entity_user_embed = nn.Embedding(self.n_entities, self.entity_dim)
         self.W_R = nn.Parameter(torch.Tensor(self.n_relations, self.entity_dim, self.relation_dim))
+        self.W_A = nn.Parameter(torch.Tensor(self.relation_dim, self.n_attention_heads, self.attention_dim))
         nn.init.xavier_uniform_(self.W_R, gain=nn.init.calculate_gain('relu'))
+        nn.init.xavier_uniform_(self.W_A, gain=nn.init.calculate_gain('relu'))
 
         if (self.use_pretrain == 1) and (word_embed is not None) and (tag_embed is not None):
             other_entity_embed = nn.Parameter(torch.Tensor(self.n_entities - word_embed.shape[0], self.entity_dim))
@@ -105,7 +136,7 @@ class TKGAT(nn.Module):
             entity_user_embed = torch.cat([other_entity_embed, word_embed], dim=0)
             self.entity_user_embed.weight = nn.Parameter(entity_user_embed)
 
-            other_relation_embed = nn.Parameter(torch.Tensor(self.n_entities - tag_embed.shape[0], self.relation_dim))
+            other_relation_embed = nn.Parameter(torch.Tensor(self.n_relations - tag_embed.shape[0], self.relation_dim))
             nn.init.xavier_uniform_(other_relation_embed, gain=nn.init.calculate_gain('relu'))
             tag_embed_trans = torch.bmm(tag_embed.unsqueeze(1), self.W_R.data[-tag_embed.shape[0]:, ...]).squeeze(1)
             relation_embed = torch.cat([other_relation_embed, tag_embed_trans], dim=0)
@@ -113,15 +144,19 @@ class TKGAT(nn.Module):
 
         self.aggregator_layers = nn.ModuleList()
         for k in range(self.n_layers):
-            self.aggregator_layers.append(Aggregator(self.conv_dim_list[k], self.conv_dim_list[k + 1], self.mess_dropout[k], self.aggregation_type))
+            self.aggregator_layers.append(Aggregator(self.conv_dim_list[k], self.conv_dim_list[k + 1], self.mess_dropout[k], self.aggregation_type, self.n_attention_heads, device=self.device))
 
 
     def att_score(self, edges):
         # Equation (4)
-        r_mul_t = torch.matmul(self.entity_user_embed(edges.src['id']), self.W_r)                       # (n_edge, relation_dim)
-        r_mul_h = torch.matmul(self.entity_user_embed(edges.dst['id']), self.W_r)                       # (n_edge, relation_dim)
-        r_embed = self.relation_embed(edges.data['type'])                                               # (1, relation_dim)
-        att = torch.bmm(r_mul_t.unsqueeze(1), torch.tanh(r_mul_h + r_embed).unsqueeze(2)).squeeze(-1)   # (n_edge, 1)
+        W_ra = torch.matmul(self.W_r, self.W_A.reshape([self.relation_dim, -1]))                      # (entity_dim, n_attention_heads*attention_dim)
+        r_mul_t = torch.tanh(torch.matmul(self.entity_user_embed(edges.src['id']), W_ra))                         # (n_edge, n_attention_heads*attention_dim)
+        r_embed = self.relation_embed(edges.data['type'])                                             # (1, relation_dim)
+        r_embed_a = torch.matmul(r_embed, self.W_A.reshape([self.relation_dim, -1]))                  # (1, n_attention_heads*attention_dim)
+        r_mul_h = torch.tanh(torch.matmul(self.entity_user_embed(edges.dst['id']), W_ra) + r_embed_a)           # (n_edge, n_attention_heads*attention_dim)
+        att = r_mul_t*r_mul_h
+        del r_mul_h, r_mul_t, W_ra, r_embed, r_embed_a
+        att = torch.sum(att.reshape([-1, self.n_attention_heads, self.attention_dim]), dim=-1).reshape([-1, self.n_attention_heads, 1])              # (n_edge, n_attention_heads, 1)
         return {'att': att}
 
 

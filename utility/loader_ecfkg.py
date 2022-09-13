@@ -5,7 +5,7 @@ import collections
 import torch
 import numpy as np
 import pandas as pd
-
+import pickle
 
 class DataLoaderECFKG(object):
 
@@ -13,25 +13,44 @@ class DataLoaderECFKG(object):
         self.args = args
         self.data_name = args.data_name
         self.use_pretrain = args.use_pretrain
-        self.pretrain_embedding_dir = args.pretrain_embedding_dir
+        # self.pretrain_embedding_dir = args.pretrain_embedding_dir
+        self.name = 'DataLoaderECFKG_' + args.data_name + ('_use_pretrain' if self.use_pretrain else '') + '_dump.pkl'
+        self.dump_path = os.path.join(args.dump_dir, self.name)
+
+        
+
+        # detect dump file to accelerate process
+        if os.path.exists(self.dump_path):
+            with open(self.dump_path, 'rb') as dump_file:
+                state_dict = pickle.load(dump_file)
+            self.__dict__.update(state_dict)
+        else:
+
+            data_dir = os.path.join(args.data_dir, args.data_name)
+            train_file = os.path.join(data_dir, 'train.txt')
+            test_file = os.path.join(data_dir, 'test.txt')
+            valid_file = os.path.join(data_dir, 'valid.txt')
+            if self.args.social_net:
+                kg_file = os.path.join(data_dir, "social_network.txt")
+            else:
+                kg_file = os.path.join(data_dir, "kg_final.txt")
+
+            self.cf_train_data, self.train_user_dict = self.load_cf(train_file)
+            self.cf_test_data, self.test_user_dict = self.load_cf(test_file)
+            self.cf_valid_data, self.valid_user_dict = self.load_cf(valid_file)
+            self.statistic_cf()
+
+            kg_data = self.load_kg(kg_file)
+            self.construct_data(kg_data)
+
+            with open(self.dump_path, 'wb') as dump_file:
+                pickle.dump(self.__dict__, dump_file, 2)
 
         self.train_batch_size = args.train_batch_size
-
-        data_dir = os.path.join(args.data_dir, args.data_name)
-        train_file = os.path.join(data_dir, 'train.txt')
-        test_file = os.path.join(data_dir, 'test.txt')
-        kg_file = os.path.join(data_dir, "kg_final.txt")
-
-        self.cf_train_data, self.train_user_dict = self.load_cf(train_file)
-        self.cf_test_data, self.test_user_dict = self.load_cf(test_file)
-        self.statistic_cf()
-
-        kg_data = self.load_kg(kg_file)
-        self.construct_data(kg_data)
         self.print_info(logging)
-
-        if self.use_pretrain == 1:
-            self.load_pretrained_data()
+        
+        # if self.use_pretrain == 1:
+        #     self.load_pretrained_data()
 
 
     def load_cf(self, filename):
@@ -59,11 +78,11 @@ class DataLoaderECFKG(object):
 
 
     def statistic_cf(self):
-        self.n_users = max(max(self.cf_train_data[0]), max(self.cf_test_data[0])) + 1
-        self.n_items = max(max(self.cf_train_data[1]), max(self.cf_test_data[1])) + 1
+        self.n_users = max(max(self.cf_train_data[0]), max(self.cf_valid_data[0]), max(self.cf_test_data[0])) + 1
+        self.n_items = max(max(self.cf_train_data[1]), max(self.cf_valid_data[1]), max(self.cf_test_data[1])) + 1
         self.n_cf_train = len(self.cf_train_data[0])
         self.n_cf_test = len(self.cf_test_data[0])
-
+        self.n_cf_valid = len(self.cf_valid_data[0])
 
     def load_kg(self, filename):
         kg_data = pd.read_csv(filename, sep=' ', names=['h', 'r', 't'], engine='python')
@@ -82,14 +101,22 @@ class DataLoaderECFKG(object):
         # re-map user id
         kg_data['r'] += 2
         self.n_relations = max(kg_data['r']) + 1
-        self.n_entities = max(max(kg_data['h']), max(kg_data['t'])) + 1
+        if self.args.social_net:
+            self.n_entities = self.n_items
+        else:
+            self.n_entities = max(max(kg_data['h']), max(kg_data['t'])) + 1
         self.n_users_entities = self.n_users + self.n_entities
+        if self.args.social_net: # shift all the user id, making user ids follow item ids
+            kg_data['h'] += self.n_entities
+            kg_data['t'] += self.n_entities
 
         self.cf_train_data = (np.array(list(map(lambda d: d + self.n_entities, self.cf_train_data[0]))).astype(np.int32), self.cf_train_data[1].astype(np.int32))
         self.cf_test_data = (np.array(list(map(lambda d: d + self.n_entities, self.cf_test_data[0]))).astype(np.int32), self.cf_test_data[1].astype(np.int32))
+        self.cf_valid_data = (np.array(list(map(lambda d: d + self.n_entities, self.cf_valid_data[0]))).astype(np.int32), self.cf_valid_data[1].astype(np.int32))
 
         self.train_user_dict = {k + self.n_entities: np.unique(v).astype(np.int32) for k, v in self.train_user_dict.items()}
         self.test_user_dict = {k + self.n_entities: np.unique(v).astype(np.int32) for k, v in self.test_user_dict.items()}
+        self.valid_user_dict = {k + self.n_entities: np.unique(v).astype(np.int32) for k, v in self.valid_user_dict.items()}
 
         # add interactions to kg data
         self.relation_u2i_id = 0
@@ -110,11 +137,21 @@ class DataLoaderECFKG(object):
         reverse_cf2kg_test_data['h'] = self.cf_test_data[1]
         reverse_cf2kg_test_data['t'] = self.cf_test_data[0]
 
+        cf2kg_valid_data = pd.DataFrame(np.zeros((self.n_cf_valid, 3), dtype=np.int32), columns=['h', 'r', 't'])
+        cf2kg_valid_data['h'] = self.cf_valid_data[0]
+        cf2kg_valid_data['t'] = self.cf_valid_data[1]
+        
+        reverse_cf2kg_valid_data = pd.DataFrame(np.ones((self.n_cf_valid, 3), dtype=np.int32), columns=['h', 'r', 't'])
+        reverse_cf2kg_valid_data['h'] = self.cf_valid_data[1]
+        reverse_cf2kg_valid_data['t'] = self.cf_valid_data[0]
+
         self.kg_train_data = pd.concat([kg_data, cf2kg_train_data, reverse_cf2kg_train_data], ignore_index=True)
         self.kg_test_data = pd.concat([kg_data, cf2kg_test_data, reverse_cf2kg_test_data], ignore_index=True)
+        self.kg_valid_data = pd.concat([kg_data, cf2kg_valid_data, reverse_cf2kg_valid_data], ignore_index=True)
 
         self.n_kg_train = len(self.kg_train_data)
         self.n_kg_test = len(self.kg_test_data)
+        self.n_kg_valid = len(self.kg_valid_data)
 
         # construct kg dict
         self.train_kg_dict = collections.defaultdict(list)
@@ -131,6 +168,13 @@ class DataLoaderECFKG(object):
             self.test_kg_dict[h].append((t, r))
             self.test_relation_dict[r].append((h, t))
 
+        self.valid_kg_dict = collections.defaultdict(list)
+        self.valid_relation_dict = collections.defaultdict(list)
+        for row in self.kg_valid_data.iterrows():
+            h, r, t = row[1]
+            self.valid_kg_dict[h].append((t, r))
+            self.valid_relation_dict[r].append((h, t))
+
 
     def print_info(self, logging):
         logging.info('n_users:            %d' % self.n_users)
@@ -141,9 +185,11 @@ class DataLoaderECFKG(object):
 
         logging.info('n_cf_train:         %d' % self.n_cf_train)
         logging.info('n_cf_test:          %d' % self.n_cf_test)
+        logging.info('n_cf_valid:         %d' % self.n_cf_valid)
 
         logging.info('n_kg_train:         %d' % self.n_kg_train)
         logging.info('n_kg_test:          %d' % self.n_kg_test)
+        logging.info('n_kg_valid:         %d' % self.n_kg_valid)
 
 
     def sample_pos_triples_for_h(self, kg_dict, head, n_sample_pos_triples):

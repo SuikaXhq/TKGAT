@@ -20,15 +20,22 @@ from utility.helper import *
 from utility.loader_nfm import DataLoaderNFM
 
 
-def evaluate(model, dataloader, user_ids, K, use_cuda, device):
+def evaluate(model, dataloader, user_ids, K, use_cuda, device, is_valid=True):
     n_users = len(user_ids)             # user number in test data
     n_items = dataloader.n_items
     n_entities = dataloader.n_entities
     test_batch_size = dataloader.test_batch_size
     train_user_dict = dataloader.train_user_dict
-    test_user_dict = dataloader.test_user_dict
+    if is_valid:
+        test_user_dict = dataloader.valid_user_dict
+    else:
+        test_user_dict = dataloader.test_user_dict
 
     model.eval()
+
+    precision_k = []
+    recall_k = []
+    ndcg_k = []
 
     item_ids = list(range(n_items))
     user_item_pairs = itertools.product(user_ids, item_ids)
@@ -59,12 +66,21 @@ def evaluate(model, dataloader, user_ids, K, use_cuda, device):
     cf_scores = cf_scores.cpu()
     user_ids = np.array(user_ids)
     item_ids = np.array(item_ids)
-    precision_k, recall_k, ndcg_k = calc_metrics_at_k(cf_scores, train_user_dict, test_user_dict, user_ids, item_ids, K)
+    precision, recall, ndcg = calc_metrics_at_k(cf_scores, train_user_dict, test_user_dict, user_ids, item_ids, K)
 
     cf_scores = cf_scores.numpy()
-    precision_k = precision_k.mean()
-    recall_k = recall_k.mean()
-    ndcg_k = ndcg_k.mean()
+    if type(K) == int:
+        precision_k = np.mean(precision)
+        recall_k = np.mean(recall)
+        ndcg_k = np.mean(ndcg)
+    else:
+        for k in range(len(K)):
+            precision_k.append(np.mean(precision[k]))
+            recall_k.append(np.mean(recall[k]))
+            ndcg_k.append(np.mean(ndcg[k]))
+    # precision_k = precision_k.mean()
+    # recall_k = recall_k.mean()
+    # ndcg_k = ndcg_k.mean()
     return cf_scores, precision_k, recall_k, ndcg_k
 
 
@@ -80,7 +96,7 @@ def train(args):
 
     # GPU / CPU
     use_cuda = torch.cuda.is_available()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
     n_gpu = torch.cuda.device_count()
     if n_gpu > 0:
         torch.cuda.manual_seed_all(args.seed)
@@ -166,11 +182,16 @@ def train(args):
     # save model
     save_model(model, args.save_dir, epoch)
 
+    # test best model
+    best_model_dir = os.path.join(args.save_dir, 'model_epoch{}.pth'.format(best_epoch))
+    model = load_model(model, best_model_dir)
+    model.to(device)
+
     # save metrics
-    _, precision, recall, ndcg = evaluate(model, data, sample_user_ids, args.K, use_cuda, device)
+    _, precision, recall, ndcg = evaluate(model, data, sample_user_ids, args.K, use_cuda, device, is_valid=False)
     logging.info('Final CF Evaluation: Precision {:.4f} Recall {:.4f} NDCG {:.4f}'.format(precision, recall, ndcg))
 
-    epoch_list.append(epoch)
+    epoch_list.append('Test_best')
     precision_list.append(precision)
     recall_list.append(recall)
     ndcg_list.append(ndcg)
@@ -195,7 +216,9 @@ def predict(args):
 
     # load data
     data = DataLoaderNFM(args, logging)
+    K = np.arange(1,21)
 
+    # if not os.path.exists(os.path.join(args.save_dir, 'cf_scores.npy')):
     user_ids = list(data.test_user_dict.keys())
     if args.n_evaluate_users and 0 < args.n_evaluate_users < len(user_ids):
         sample_user_ids = random.sample(user_ids, args.n_evaluate_users)
@@ -204,20 +227,32 @@ def predict(args):
 
     # load model
     model = NFM(args, data.n_users, data.n_items, data.n_entities)
-    model = load_model(model, args.pretrain_model_path)
+    model = load_model(model, get_best_model(args.save_dir))
+    print(f'Loaded {get_best_model(args.save_dir)}')
     model.to(device)
 
     # predict
-    cf_scores, precision, recall, ndcg = evaluate(model, data, sample_user_ids, args.K, use_cuda, device)
+    cf_scores, precision, recall, ndcg = evaluate(model, data, sample_user_ids, K, use_cuda, device)
     np.save(args.save_dir + 'cf_scores.npy', cf_scores)
-    print('CF Evaluation: Precision {:.4f} Recall {:.4f} NDCG {:.4f}'.format(precision, recall, ndcg))
+    # print('CF Evaluation: Precision {:.4f} Recall {:.4f} NDCG {:.4f}'.format(precision, recall, ndcg))
+    # else:
+        #  precision, recall, ndcg = evaluate_with_scores(model, data, sample_user_ids, K, use_cuda, device)
 
+    if not os.path.exists(args.result_dir):
+        os.makedirs(args.result_dir)
+    with open(os.path.join(args.result_dir, 'test_result.tsv'), mode='w') as f:
+        f.write('K\tprecision@K\trecall@K\tndcg@K\n')
+        for k in K:
+            f.write('{}\t{}\t{}\t{}\n'.format(k, precision[k-1], recall[k-1], ndcg[k-1]))
 
 
 if __name__ == '__main__':
     args = parse_nfm_args()
-    train(args)
-    # predict(args)
+    # os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
+    if args.test:
+        predict(args)
+    else:
+        train(args)
 
 
 

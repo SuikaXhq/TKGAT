@@ -14,7 +14,7 @@ class DataLoaderTKGAT(object):
         self.args = args
         self.data_name = args.data_name
         self.use_pretrain = args.use_pretrain
-        self.name = 'DataLoaderTKGAT_' + args.data_name + '_dump.pkl'
+        self.name = 'DataLoaderTKGAT_' + args.data_name + '_' + ('' if self.use_pretrain!=0 else 'no-pretrain_') + 'dump.pkl'
         self.dump_path = os.path.join(args.dump_dir, self.name)
         self.id_offset = {} # entity ID offset dict
         self.id_offset['item'] = 0
@@ -30,7 +30,10 @@ class DataLoaderTKGAT(object):
             train_file = os.path.join(data_dir, 'train.txt')
             valid_file = os.path.join(data_dir, 'valid.txt')
             test_file = os.path.join(data_dir, 'test.txt')
-            kg_file = os.path.join(data_dir, "kg_final.txt")
+            if self.args.social_net:
+                kg_file = os.path.join(data_dir, "social_network.txt")
+            else:
+                kg_file = os.path.join(data_dir, "kg_final.txt")
             tag_file = os.path.join(data_dir, "tagging.txt")
             tag_description_file = os.path.join(data_dir, "tag_list.txt")
 
@@ -105,12 +108,15 @@ class DataLoaderTKGAT(object):
         with open(filename, mode='r') as f:
             for line in f.readlines()[1:]:
                 org_id, tag_id, desciption = line.split('\t')
-                for word in desciption.split():
+                for word in desciption.replace('_', ' ').split():
                     if word in self.wordvec:
                         tag_desciption[int(tag_id)].append(word)
         return tag_desciption
 
     def construct_data(self, kg_data, tag_data):
+        # entity list: [items, kg_entities, users, words]
+        # relation list: [(0,1)interaction&reverse, kg_relations, word_relation(4), tags]
+
         # plus inverse kg data
         n_relations = max(kg_data['r']) + 1
         reverse_kg_data = kg_data.copy()
@@ -121,38 +127,47 @@ class DataLoaderTKGAT(object):
         # re-map user id (add user entities into KG, index following the last entity of KG)
         kg_data['r'] += 2 # 0th relation is user-item, 1st relation is item-user
         self.n_relations_kg = max(kg_data['r']) + 1 # relation nuumber in KG
-        self.n_entities_kg = max(max(kg_data['h']), max(kg_data['t'])) + 1 # total entity number in KG
+        if self.args.social_net:
+            self.n_entities_kg = self.n_items
+        else:
+            self.n_entities_kg = max(max(kg_data['h']), max(kg_data['t'])) + 1 # total entity number in KG
         self.n_users_entities_kg = self.n_users + self.n_entities_kg
 
         self.id_offset['word_relations'] = self.n_relations_kg
         self.id_offset['tag'] = self.id_offset['word_relations'] + 4 # user-word, item-word and their reverse, 4 relations in total
         self.id_offset['user'] = self.n_entities_kg
-        self.id_offset['word'] = self.n_users_entities_kg
+        if self.args.social_net: # shift all the user id, making user ids follow item ids
+            kg_data['h'] += self.id_offset['user']
+            kg_data['t'] += self.id_offset['user']
+        if self.use_pretrain == 1: self.id_offset['word'] = self.n_users_entities_kg
         
         # add tag-related word nodes
-        word_entities = set()
-        for description in self.tag_description.values():
-            for word in description:
-                word_entities.add(word)
-        self.word_entities = list(word_entities)
-        word_entity_id = {entity: id for id, entity in enumerate(self.word_entities)}
-        self.n_words = len(self.word_entities) # number of added word nodes
+        if self.use_pretrain == 1:
+            word_entities = set()
+            for description in self.tag_description.values():
+                for word in description:
+                    word_entities.add(word)
+            self.word_entities = list(word_entities)
+            word_entity_id = {entity: id for id, entity in enumerate(self.word_entities)}
+            self.n_words = len(self.word_entities) # number of added word nodes
 
-        word_interaction_data = []
-        for i, row in tag_data.iterrows():
-            user, tag, item = row['h'], row['r'], row['t']
-            for word in self.tag_description[tag]:
-                word_interaction_data.append((user + self.id_offset['user'], 0 + self.id_offset['word_relations'], word_entity_id[word] + self.id_offset['word']))
-                word_interaction_data.append((item + self.id_offset['item'], 1 + self.id_offset['word_relations'], word_entity_id[word] + self.id_offset['word']))
-        word_data = pd.DataFrame(data=word_interaction_data, columns=['h', 'r', 't']).drop_duplicates()
-        reverse_word_data = word_data.copy()
-        reverse_word_data = reverse_word_data.rename({'h': 't', 't': 'h'}, axis='columns')
-        reverse_word_data['r'] += 2
-        kg_data = pd.concat([kg_data, word_data, reverse_word_data], axis=0, ignore_index=True, sort=False)
+            word_interaction_data = []
+            for i, row in tag_data.iterrows():
+                user, tag, item = row['h'], row['r'], row['t']
+                for word in self.tag_description[tag]:
+                    word_interaction_data.append((user + self.id_offset['user'], 0 + self.id_offset['word_relations'], word_entity_id[word] + self.id_offset['word']))
+                    word_interaction_data.append((item + self.id_offset['item'], 1 + self.id_offset['word_relations'], word_entity_id[word] + self.id_offset['word']))
+            word_data = pd.DataFrame(data=word_interaction_data, columns=['h', 'r', 't']).drop_duplicates()
+            reverse_word_data = word_data.copy()
+            reverse_word_data = reverse_word_data.rename({'h': 't', 't': 'h'}, axis='columns')
+            reverse_word_data['r'] += 2
+            kg_data = pd.concat([kg_data, word_data, reverse_word_data], axis=0, ignore_index=True, sort=False)
 
         # add tag interactions
         self.n_tags = max(tag_data['r']) + 1
+        tag_data['h'] += self.id_offset['user']
         tag_data['r'] += self.id_offset['tag']
+        tag_data['t'] += self.id_offset['item']
         reverse_tag_data = tag_data.copy()
         reverse_tag_data = reverse_tag_data.rename({'h': 't', 't': 'h'}, axis='columns')
         reverse_tag_data['r'] += self.n_tags
@@ -233,7 +248,7 @@ class DataLoaderTKGAT(object):
         logging.info('n_users_entities_kg:       %d' % self.n_users_entities_kg)
         logging.info('n_relations_kg:            %d' % self.n_relations_kg)         # number of relations in KG
         logging.info('n_tags:                    %d' % self.n_tags)                 # number of tags
-        logging.info('n_words:                   %d' % self.n_words)                # number of added word nodes
+        if self.use_pretrain!=0: logging.info('n_words:                   %d' % self.n_words)                # number of added word nodes
         logging.info('n_entities:                %d' % self.n_entities)             # number of total entities (include item, KG entities, user, word nodes)
         logging.info('n_relations:               %d' % self.n_relations)            # number of total relations (include KG relations, interaction relations)
         logging.info('n_cf_train:                %d' % self.n_cf_train)
@@ -283,23 +298,25 @@ class DataLoaderTKGAT(object):
         return sample_pos_items
 
 
-    def sample_neg_items_for_u(self, user_dict, user_id, n_sample_neg_items, att_score): # TODO: active sampling
+    def sample_neg_items_for_u(self, user_dict, user_id, n_sample_neg_items, att_score=None): # TODO: active sampling
         pos_items = user_dict[user_id]
 
         sample_neg_items = []
         while True:
             if len(sample_neg_items) == n_sample_neg_items:
                 break
-
-            neg_item_id = np.random.randint(low=0, high=self.n_items, size=1)[0]
-            # neg_item_id = np.random.choice(np.arange(self.n_items), p=1-att_score)
+        
+            if att_score is None:
+                neg_item_id = np.random.randint(low=0, high=self.n_items, size=1)[0]
+            else:
+                neg_item_id = np.random.choice(np.arange(self.n_items), p=1-att_score)
             if neg_item_id not in pos_items and neg_item_id not in sample_neg_items:
                 sample_neg_items.append(neg_item_id)
         return sample_neg_items
 
 
     def generate_cf_batch(self, user_dict, att_score=None):
-        exist_users = user_dict.keys()
+        exist_users = list(user_dict.keys())
         if self.cf_batch_size <= len(exist_users):
             batch_user = random.sample(exist_users, self.cf_batch_size)
         else:

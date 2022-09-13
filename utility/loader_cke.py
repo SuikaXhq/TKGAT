@@ -5,7 +5,7 @@ import collections
 import torch
 import numpy as np
 import pandas as pd
-
+import pickle
 
 class DataLoaderCKE(object):
 
@@ -14,26 +14,41 @@ class DataLoaderCKE(object):
         self.data_name = args.data_name
         self.use_pretrain = args.use_pretrain
         self.pretrain_embedding_dir = args.pretrain_embedding_dir
+        self.name = 'DataLoaderCKE_' + args.data_name + '_dump.pkl'
+        self.dump_path = os.path.join(args.dump_dir, self.name)
 
+        if os.path.exists(self.dump_path):
+            with open(self.dump_path, 'rb') as dump_file:
+                state_dict = pickle.load(dump_file)
+            self.__dict__.update(state_dict)
+        else:
+            data_dir = os.path.join(args.data_dir, args.data_name)
+            train_file = os.path.join(data_dir, 'train.txt')
+            test_file = os.path.join(data_dir, 'test.txt')
+            valid_file = os.path.join(data_dir, 'valid.txt')
+            if self.args.social_net:
+                kg_file = os.path.join(data_dir, "social_network.txt")
+            else:
+                kg_file = os.path.join(data_dir, "kg_final.txt")
+
+            self.cf_train_data, self.train_user_dict = self.load_cf(train_file)
+            self.cf_test_data, self.test_user_dict = self.load_cf(test_file)
+            self.cf_valid_data, self.valid_user_dict = self.load_cf(valid_file)
+            self.statistic_cf()
+
+            kg_data = self.load_kg(kg_file)
+            self.construct_data(kg_data)
+
+            with open(self.dump_path, 'wb') as dump_file:
+                pickle.dump(self.__dict__, dump_file, 2)
+            
         self.cf_batch_size = args.cf_batch_size
         self.kg_batch_size = args.kg_batch_size
 
-        data_dir = os.path.join(args.data_dir, args.data_name)
-        train_file = os.path.join(data_dir, 'train.txt')
-        test_file = os.path.join(data_dir, 'test.txt')
-        kg_file = os.path.join(data_dir, "kg_final.txt")
-
-        self.cf_train_data, self.train_user_dict = self.load_cf(train_file)
-        self.cf_test_data, self.test_user_dict = self.load_cf(test_file)
-        self.statistic_cf()
-
-        kg_data = self.load_kg(kg_file)
-        self.construct_data(kg_data)
         self.print_info(logging)
 
         if self.use_pretrain == 1:
             self.load_pretrained_data()
-
 
     def load_cf(self, filename):
         user = []
@@ -64,7 +79,7 @@ class DataLoaderCKE(object):
         self.n_items = max(max(self.cf_train_data[1]), max(self.cf_test_data[1])) + 1
         self.n_cf_train = len(self.cf_train_data[0])
         self.n_cf_test = len(self.cf_test_data[0])
-
+        self.n_cf_valid = len(self.cf_valid_data[0])
 
     def load_kg(self, filename):
         kg_data = pd.read_csv(filename, sep=' ', names=['h', 'r', 't'], engine='python')
@@ -81,8 +96,14 @@ class DataLoaderCKE(object):
         self.kg_data = pd.concat([kg_data, reverse_kg_data], axis=0, ignore_index=True, sort=False)
 
         self.n_relations = max(self.kg_data['r']) + 1
-        self.n_entities = max(max(self.kg_data['h']), max(kg_data['t'])) + 1
+        if self.args.social_net:
+            self.n_entities = self.n_items
+        else:
+            self.n_entities = max(max(self.kg_data['h']), max(kg_data['t'])) + 1
         self.n_kg_data = len(self.kg_data)
+        if self.args.social_net: # shift all the user id, making user ids follow item ids
+            kg_data['h'] += self.n_entities
+            kg_data['t'] += self.n_entities
 
         # construct kg dict
         self.kg_dict = collections.defaultdict(list)
@@ -103,6 +124,7 @@ class DataLoaderCKE(object):
 
         logging.info('n_cf_train:         %d' % self.n_cf_train)
         logging.info('n_cf_test:          %d' % self.n_cf_test)
+        logging.info('n_cf_valid:          %d' % self.n_cf_valid)
 
 
     def sample_pos_items_for_u(self, user_dict, user_id, n_sample_pos_items):

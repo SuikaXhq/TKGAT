@@ -21,6 +21,8 @@ def parse_kgat_args():
                         help='Path of learned embeddings.')
     parser.add_argument('--pretrain_model_path', nargs='?', default='trained_model/model_best.pth',
                         help='Path of stored model.')
+    parser.add_argument('--social_net', action='store_true',
+                        help='Whether it is a social network enhanced RS dataset.')
 
     parser.add_argument('--cf_batch_size', type=int, default=1024,
                         help='CF batch size.')
@@ -31,7 +33,7 @@ def parse_kgat_args():
 
     parser.add_argument('--entity_dim', type=int, default=100,
                         help='User / entity Embedding size.')
-    parser.add_argument('--relation_dim', type=int, default=100,
+    parser.add_argument('--relation_dim', type=int, default=50,
                         help='Relation Embedding size.')
 
     parser.add_argument('--aggregation_type', nargs='?', default='bi-interaction',
@@ -46,29 +48,38 @@ def parse_kgat_args():
     parser.add_argument('--cf_l2loss_lambda', type=float, default=1e-5,
                         help='Lambda when calculating CF l2 loss.')
 
-    parser.add_argument('--lr', type=float, default=0.0001,
+    parser.add_argument('--lr', type=float, default=0.001,
                         help='Learning rate.')
     parser.add_argument('--n_epoch', type=int, default=1000,
                         help='Number of epoch.')
-    parser.add_argument('--stopping_steps', type=int, default=10,
+    parser.add_argument('--stopping_steps', type=int, default=50,
                         help='Number of epoch for early stopping')
 
-    parser.add_argument('--cf_print_every', type=int, default=10,
+    parser.add_argument('--cf_print_every', type=int, default=1,
                         help='Iter interval of printing CF loss.')
-    parser.add_argument('--kg_print_every', type=int, default=10,
+    parser.add_argument('--kg_print_every', type=int, default=1,
                         help='Iter interval of printing KG loss.')
     parser.add_argument('--evaluate_every', type=int, default=1,
                         help='Epoch interval of evaluating CF.')
-
+    parser.add_argument('--gpu', type=int, default=1,
+                        help='index of GPU to use.')
     parser.add_argument('--K', type=int, default=20,
                         help='Calculate metric@K when evaluating.')
+    parser.add_argument('--test', action='store_true',
+                        help='Only test the pretrained model.')
 
     args = parser.parse_args()
 
+    args.dump_dir = 'trained_model/KGAT/{}'.format(args.data_name)
     save_dir = 'trained_model/KGAT/{}/entitydim{}_relationdim{}_{}_{}_lr{}_pretrain{}/'.format(
         args.data_name, args.entity_dim, args.relation_dim, args.aggregation_type,
         '-'.join([str(i) for i in eval(args.conv_dim_list)]), args.lr, args.use_pretrain)
     args.save_dir = save_dir
+
+    result_dir = 'results/KGAT/{}/entitydim{}_relationdim{}_{}_{}_lr{}_pretrain{}/'.format(
+        args.data_name, args.entity_dim, args.relation_dim, args.aggregation_type,
+        '-'.join([str(i) for i in eval(args.conv_dim_list)]), args.lr, args.use_pretrain)
+    args.result_dir = result_dir
 
     return args
 

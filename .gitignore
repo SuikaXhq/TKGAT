@@ -15,3 +15,6 @@ datasets/hetrec2011-delicious-2k/
 datasets/hetrec2011-lastfm-2k/
 datasets/hetrec2011-movielens-2k-v2/
 datasets/glove*.txt
+datasets/old/
+case_study/
+.vscode/

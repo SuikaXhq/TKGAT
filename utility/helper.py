@@ -1,5 +1,6 @@
 import os
 from collections import OrderedDict
+from pyexpat import model
 
 import torch
 from dgl import function as fn
@@ -19,8 +20,7 @@ def edge_softmax_fix(graph, score):
     graph.edata['out'] = torch.exp(graph.edata['out'])
     graph.update_all(fn.copy_e('out', 'temp'), reduce_sum)
     graph.apply_edges(fn.e_div_v('out', 'out_sum', 'out'))
-    out = graph.edata['out']
-    return out
+    return graph.edata.pop('out')
 
 
 def early_stopping(recall_list, stopping_steps):
@@ -51,6 +51,8 @@ def load_model(model, model_path):
     try:
         model.load_state_dict(checkpoint['model_state_dict'])
     except RuntimeError:
+        print('checkpoint:', checkpoint['model_state_dict'].keys())
+        print('model:', model.state_dict().keys())
         state_dict = OrderedDict()
         for k, v in checkpoint['model_state_dict'].items():
             k_ = k[7:]              # remove 'module.' of DistributedDataParallel instance
@@ -60,6 +62,13 @@ def load_model(model, model_path):
     model.eval()
     return model
 
-
+def get_best_model(save_path):
+    file_list = os.listdir(save_path)
+    model_list = []
+    for file in file_list:
+        if os.path.splitext(file)[1] == '.pth':
+            model_list.append(file)
+    model_list.sort()
+    return os.path.join(save_path, model_list[0])
 
 
